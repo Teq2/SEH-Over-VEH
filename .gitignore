@@ -3,3 +3,4 @@ obj/
 Debug/
 Release/
 *.sdf
+.gitignore
