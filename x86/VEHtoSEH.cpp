@@ -1,22 +1,26 @@
 /*
-* Implementation of Structured Exceptions Handling inside Vectored Exception Handler
+* Implementation of Structured Exceptions Handling inside a Vectored Exception Handler
 * For x86-platforms
 * Usage: 
 * 1. Include this file
 * 2. Call `EnableSEHoverVEH()` (once)
-* Teq (c) 01.2015
+*
+* Code fully based on reversed kernel and opened WRK sources.
+* Teq 01.2015-02.2020
 */
 
 #include <windows.h>
 #include <WinNT.h>
 #include <excpt.h>
-// from \VC\crt\src\eh\i386\trnsctrl.cpp
-#define EXCEPTION_UNWINDING 0x2         // Unwind is in progress
-#define EXCEPTION_EXIT_UNWIND 0x4       // Exit unwind is in progress
-#define EXCEPTION_STACK_INVALID 0x8     // Stack out of limits or unaligned
-#define EXCEPTION_NESTED_CALL 0x10      // Nested exception handler call
-#define EXCEPTION_TARGET_UNWIND 0x20    // Target unwind in progress
-#define EXCEPTION_COLLIDED_UNWIND 0x40  // Collided exception handler call
+
+// from \crt\src\eh\i386\trnsctrl.cpp
+#define EXCEPTION_UNWINDING 0x2         /* Unwind is in progress */
+#define EXCEPTION_EXIT_UNWIND 0x4       /* Exit unwind is in progress */
+#define EXCEPTION_STACK_INVALID 0x8     /* Stack out of limits or unaligned */
+#define EXCEPTION_NESTED_CALL 0x10      /* Nested exception handler call */
+#define EXCEPTION_TARGET_UNWIND 0x20    /* Target unwind in progress */
+#define EXCEPTION_COLLIDED_UNWIND 0x40  /* Collided exception handler call */
+
 extern "C" NTSYSAPI VOID NTAPI RtlRaiseException(PEXCEPTION_RECORD ExceptionRecord);
 extern "C" NTSYSAPI NTSTATUS NTAPI NtContinue(IN PCONTEXT ThreadContext, IN BOOLEAN RaiseAlert );
 extern "C" NTSYSAPI NTSTATUS NTAPI NtRaiseException(IN PEXCEPTION_RECORD ExceptionRecord, IN PCONTEXT ThreadContext, IN BOOLEAN HandleException);
@@ -33,29 +37,29 @@ __declspec(naked) EXCEPTION_REGISTRATION* GetRegistrationHead()
 	__asm retn
 }
 
-EXCEPTION_DISPOSITION ExecuteExceptionHandler(EXCEPTION_RECORD *ExceptionRecord, PLONG pEstablisherFrame, CONTEXT *ContextRecord, PLONG pDispatcherContext)
+EXCEPTION_DISPOSITION NestedExceptionHandler(EXCEPTION_RECORD *ExceptionRecord, PLONG pEstablisherFrame, CONTEXT *ContextRecord, PLONG pDispatcherContext)
 {
 	if (ExceptionRecord->ExceptionFlags& (EXCEPTION_UNWINDING|EXCEPTION_EXIT_UNWIND))
 		return ExceptionContinueSearch;
 	else 
 	{
-		*pDispatcherContext = *(pEstablisherFrame+2); // + sizeof(long) x2
+		*pDispatcherContext = *(pEstablisherFrame+2); /* move previously saved EstablisherFrame from [pEstablisherFrame+8h] */
 		return ExceptionNestedException;
 	}
-}
+} 
 
 EXCEPTION_DISPOSITION SafeExecuteHandler(EXCEPTION_RECORD *ExceptionRecord, PVOID EstablisherFrame, CONTEXT *ContextRecord, PVOID DispatcherContext, PEXCEPTION_ROUTINE pHandler)
 {
 	__asm  {
 		/*
-			Microsoft's trick to use __cdecl / __stdcall handlers with various parameters list
-			If you use C++ exceptions - leave this as is, in case of C++ exception catched 
-			unwinding will be done in MSVCR._UnwindNestedFrames, where atleast one nested seh-frame is assumed
-			(check developer's commentaries in MSVCR:\crt\src\eh\i386\trnsctrl.cpp), 
-			seh-frame will be released in MSVCR._JumpToContinuation
+            An additional frame to catch nested exception, also for running __cdecl/__stdcall handlers correctly.
+
+            If you use C++ exceptions - leave this as is, when C++ exception will be catched
+            unwinding will be done in MSVCR._UnwindNestedFrames (check developer's commentaries
+            in \crt\src\eh\i386\trnsctrl.cpp and view _JumpToContinuation)
 		*/
-		push	EstablisherFrame  /* save EstablisherFrame in case of nested exception */
-		push	ExecuteExceptionHandler
+		push	EstablisherFrame        /* save EstablisherFrame for nested exception */
+		push	NestedExceptionHandler
 		push	dword ptr fs:[0]
 		mov		dword ptr fs:[0], esp
 	}
@@ -63,20 +67,21 @@ EXCEPTION_DISPOSITION SafeExecuteHandler(EXCEPTION_RECORD *ExceptionRecord, PVOI
 
 	__asm {
 		mov		esp, dword ptr fs:[0]
-		pop		dword ptr fs:[0]             
+		pop		dword ptr fs:[0] 
+        add     esp, 8                  /* restore stack to prevent esi/edi corruption */
 	}
 	return Disposition;
 }
 
-// VectoredDispatcherOfStructuredExceptions
-_declspec(noreturn) VOID CALLBACK VectoredSEH(PEXCEPTION_POINTERS ExceptionInfo)
+// VEH as a dispatcher of structured exceptions
+_declspec(noreturn) VOID CALLBACK DispatchStructuredException(PEXCEPTION_POINTERS ExceptionInfo)
 {
 	PCONTEXT ctx = ExceptionInfo->ContextRecord;
 	PEXCEPTION_RECORD ex = ExceptionInfo->ExceptionRecord;
 	PEXCEPTION_REGISTRATION Registration = GetRegistrationHead();
-	PEXCEPTION_REGISTRATION NestedRegistration = 0, DispatcherContext = 0;
+	PEXCEPTION_REGISTRATION NestedRegistration = 0, DispatcherContext = 0; 
 
-	while ((LONG)Registration != -1) // -1 means end of chain
+	while ((LONG)Registration != -1)    /* -1 means end of chain */
 	{
 		EXCEPTION_DISPOSITION  Disposition = SafeExecuteHandler(ex, Registration, ctx, &DispatcherContext, Registration->handler);
 
@@ -138,5 +143,5 @@ _declspec(noreturn) VOID CALLBACK VectoredSEH(PEXCEPTION_POINTERS ExceptionInfo)
 
 void EnableSEHoverVEH()
 {
-	AddVectoredExceptionHandler(0, (PVECTORED_EXCEPTION_HANDLER) &VectoredSEH);
+	AddVectoredExceptionHandler(0, (PVECTORED_EXCEPTION_HANDLER) &DispatchStructuredException);
 }
